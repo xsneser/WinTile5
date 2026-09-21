@@ -1,0 +1,11 @@
+# Temporary & Log files
+*.tmp
+*.log
+wintile5_verify.txt
+
+# OS & Editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+.claude/
