@@ -7,8 +7,8 @@
 ; 布局架构：
 ;   - 左半区：4 个终端按 2x2 网格排布 (槽位 7:左上, 8:右上, 1:左下, 2:右下)
 ;   - 右半区：1 个主界面全高 (槽位 6:右侧全高)
-;   - 支持左半区 2x2 复合分屏态 (78:上半宽, 12:下半宽, 71:左列全高, 82:右列全高)
-;   - 原生 2x2 网格状态机完全同构流动，仅在 8、2、82 槽位按向右才会进入 6 号位
+;   - 支持左半区 2x2 复合分屏态 (78:上半宽, 12:下半宽, 71:左列全高, 82:右列全高, 7812:左半区全高)
+;   - 原生 2x2 网格状态机完全同构流动，仅在 8、2、82 槽位按向右才会进入 6 号位，6 号位按向左回到 82 号位
 ;
 ; 细节技术实现：
 ;   1. 隐形边框补偿 —— DWM 扩展边界测量 (DWMWA_EXTENDED_FRAME_BOUNDS)，消除 Windows 11 9px 隐形缝隙
@@ -144,14 +144,15 @@ GetLayoutInfo(monitorIndex := 1) {
     rects[1]  := {x: WL,                 y: WT + halfH + gap, w: colW,   h: bottomH}
     rects[2]  := {x: WL + colW + gap,    y: WT + halfH + gap, w: colW,   h: bottomH}
 
-    ; 4 个 2x2 复合分屏态
-    rects[78] := {x: WL,                 y: WT,               w: leftW,  h: halfH}
-    rects[12] := {x: WL,                 y: WT + halfH + gap, w: leftW,  h: bottomH}
-    rects[71] := {x: WL,                 y: WT,               w: colW,   h: workH}
-    rects[82] := {x: WL + colW + gap,    y: WT,               w: colW,   h: workH}
+    ; 5 个 2x2 复合分屏态
+    rects[78]   := {x: WL,                 y: WT,               w: leftW,  h: halfH}
+    rects[12]   := {x: WL,                 y: WT + halfH + gap, w: leftW,  h: bottomH}
+    rects[71]   := {x: WL,                 y: WT,               w: colW,   h: workH}
+    rects[82]   := {x: WL + colW + gap,    y: WT,               w: colW,   h: workH}
+    rects[7812] := {x: WL,                 y: WT,               w: leftW,  h: workH}
 
     ; 1 个右侧全高主界面
-    rects[6]  := {x: WL + leftW + gap,   y: WT,               w: rightW, h: workH}
+    rects[6]    := {x: WL + leftW + gap,   y: WT,               w: rightW, h: workH}
 
     return {
         workRect: {x: WL, y: WT, w: workW, h: workH},
@@ -272,18 +273,16 @@ SnapWindowTo(hwnd, tx, ty, tw, th) {
     global g_ModifiedHwnds
     if (WinGetMinMax(hwnd) != 0) {
         WinRestore(hwnd)
-        Sleep 30
+        Sleep 80
     }
-    ; 清除原生贴靠残留状态
+    ; 先设置直角并立即通知 DWM 刷新非客户区帧 (0x0037 = SWP_NOSIZE|SWP_NOMOVE|SWP_NOZORDER|SWP_NOACTIVATE|SWP_FRAMECHANGED)
+    SetWindowCorner(hwnd, 1)
+    g_ModifiedHwnds[hwnd] := true
     try DllCall("user32\SetWindowPos", "ptr", hwnd, "ptr", 0, "int", 0, "int", 0
-              , "int", 0, "int", 0, "uint", 0x0013, "int")
+              , "int", 0, "int", 0, "uint", 0x0037, "int")
 
     GetFrameInsets(hwnd, &iL, &iT, &iR, &iB)
     WinMove(tx - iL, ty - iT, tw + iL + iR, th + iT + iB, hwnd)
-
-    ; 强制启用无缝直角，并登记 HWND
-    SetWindowCorner(hwnd, 1)
-    g_ModifiedHwnds[hwnd] := true
 }
 
 ; 将指定窗口直接吸附到特定布局状态
@@ -300,7 +299,8 @@ SnapWindowToState(hwnd, state, monitorIndex := 0) {
 
     targetRect := layout.rects[state]
     SnapWindowTo(hwnd, targetRect.x, targetRect.y, targetRect.w, targetRect.h)
-    g_StateCache[hwnd] := {state: state, targetRect: targetRect, monitorIndex: monitorIndex}
+    actualRect := GetVisibleRect(hwnd)
+    g_StateCache[hwnd] := {state: state, targetRect: targetRect, actualRect: actualRect, monitorIndex: monitorIndex}
 }
 
 ; 吸附当前激活窗口到指定状态
@@ -315,16 +315,70 @@ SnapActiveWindow(state) {
 ; 4. 状态识别与四向状态转移引擎
 ; ==============================================================================
 
+; 纯几何评估：在全部 10 个状态中找出视觉上最贴合的目标槽位 (支持终端最小宽度超限自适应)
+FindClosestLayoutState(vRect, layout) {
+    if (vRect.w <= 0 || vRect.h <= 0)
+        return 71
+
+    tol := 15
+    ; 1. 优先检查精确贴靠 (四边误差 <= tol)
+    for state, r in layout.rects {
+        diff := Max(Abs(vRect.x - r.x), Abs(vRect.y - r.y),
+                    Abs((vRect.x + vRect.w) - (r.x + r.w)),
+                    Abs((vRect.y + vRect.h) - (r.y + r.h)))
+        if (diff <= tol)
+            return state
+    }
+
+    ; 2. 智能综合距离与中心点评估
+    bestState := 71
+    minScore := 999999
+    baseColW := Max(layout.colW, 100)
+    baseHalfH := Max(layout.halfH, 100)
+
+    cx := vRect.x + vRect.w / 2
+    cy := vRect.y + vRect.h / 2
+
+    for state, r in layout.rects {
+        ; 归一化四边距离 (除以基础网格单格尺度)
+        dLeft   := Abs(vRect.x - r.x) / baseColW
+        dTop    := Abs(vRect.y - r.y) / baseHalfH
+        dRight  := Abs((vRect.x + vRect.w) - (r.x + r.w)) / baseColW
+        dBottom := Abs((vRect.y + vRect.h) - (r.y + r.h)) / baseHalfH
+
+        ; 归一化中心点距离
+        rcx := r.x + r.w / 2
+        rcy := r.y + r.h / 2
+        dCenter := (Abs(cx - rcx) / baseColW) + (Abs(cy - rcy) / baseHalfH)
+
+        score := dLeft + dTop + dRight + dBottom + dCenter
+
+        if (score < minScore) {
+            minScore := score
+            bestState := state
+        }
+    }
+
+    return bestState
+}
+
 ; 智能识别窗口当前状态：优先缓存提示校验 -> 几何回退 -> Unknown 保护
 GetWindowState(hwnd, layout, monitorIndex) {
     global g_StateCache
     vRect := GetVisibleRect(hwnd)
     tol := 15   ; 像素容差
 
-    ; 1. 缓存提示校验：若缓存存在且窗口仍与目标矩形在容差范围内，信任缓存
+    ; 1. 缓存提示校验：优先校验实际可见矩形 actualRect，其次校验理想目标矩形 targetRect
     if g_StateCache.Has(hwnd) {
         c := g_StateCache[hwnd]
         if (c.monitorIndex == monitorIndex) {
+            if (c.HasOwnProp("actualRect")) {
+                ar := c.actualRect
+                if (Abs(vRect.x - ar.x) <= tol && Abs(vRect.y - ar.y) <= tol
+                 && Abs(vRect.w - ar.w) <= tol && Abs(vRect.h - ar.h) <= tol) {
+                    return c.state
+                }
+            }
             tr := c.targetRect
             if (Abs(vRect.x - tr.x) <= tol && Abs(vRect.y - tr.y) <= tol
              && Abs(vRect.w - tr.w) <= tol && Abs(vRect.h - tr.h) <= tol) {
@@ -333,21 +387,10 @@ GetWindowState(hwnd, layout, monitorIndex) {
         }
     }
 
-    ; 2. 几何回退：与当前显示器的全部 9 个目标矩形精确计算最大四边误差
-    bestState := "Unknown"
-    minDiff := 999999
-    for state, r in layout.rects {
-        diff := Max(Abs(vRect.x - r.x), Abs(vRect.y - r.y),
-                    Abs((vRect.x + vRect.w) - (r.x + r.w)),
-                    Abs((vRect.y + vRect.h) - (r.y + r.h)))
-        if (diff < minDiff) {
-            minDiff := diff
-            bestState := state
-        }
-    }
-
-    if (minDiff <= tol) {
-        g_StateCache[hwnd] := {state: bestState, targetRect: layout.rects[bestState], monitorIndex: monitorIndex}
+    ; 2. 几何回退：计算最贴近的布局状态，并登记缓存
+    bestState := FindClosestLayoutState(vRect, layout)
+    if (bestState != "Unknown" && layout.rects.Has(bestState)) {
+        g_StateCache[hwnd] := {state: bestState, targetRect: layout.rects[bestState], actualRect: vRect, monitorIndex: monitorIndex}
         return bestState
     }
 
@@ -359,72 +402,64 @@ GetWindowState(hwnd, layout, monitorIndex) {
 
 ; 纯状态转移函数 (无副作用，可独立测试断言)
 GetNextState(curState, dir, layout, vRect) {
-    ; 1. Unknown 状态的 4 向入口 (基于真实布局边界，非 50/50 屏幕假设)
-    if (curState == "Unknown") {
-        if (dir == "Left")
-            return 71
-        if (dir == "Right") {
-            cx := vRect.x + vRect.w // 2
-            ; 精准基于 6 号主区域的实际起始 x 坐标判断！
-            if (cx >= layout.rects[6].x)
-                return 6
-            return 82
-        }
-        if (dir == "Up")
-            return 78
-        if (dir == "Down")
-            return 12
-        return 71
+    ; 1. Unknown 状态：基于窗口当前几何推导最近状态，并在转移矩阵中正常流转
+    if (curState == "Unknown" || curState == "") {
+        inferredState := FindClosestLayoutState(vRect, layout)
+        return GetNextState(inferredState, dir, layout, vRect)
     }
 
-    ; 2. 已知 9 个状态的严密状态转移矩阵
+    ; 2. 10 个状态的严密状态转移矩阵
     if (dir == "Right") {
         switch curState {
-            case 7:  return 78
-            case 78: return 8
-            case 8:  return 6
-            case 1:  return 12
-            case 12: return 2
-            case 2:  return 6
-            case 71: return 82
-            case 82: return 6
-            case 6:  return 6
+            case 7:    return 78
+            case 78:   return 8
+            case 8:    return 6
+            case 1:    return 12
+            case 12:   return 2
+            case 2:    return 6
+            case 71:   return 7812
+            case 7812: return 82
+            case 82:   return 6
+            case 6:    return 6
         }
     } else if (dir == "Left") {
         switch curState {
-            case 6:  return 82
-            case 82: return 71
-            case 71: return 71
-            case 8:  return 78
-            case 78: return 7
-            case 7:  return 7
-            case 2:  return 12
-            case 12: return 1
-            case 1:  return 1
+            case 6:    return 82
+            case 82:   return 7812
+            case 7812: return 71
+            case 71:   return 71
+            case 8:    return 78
+            case 78:   return 7
+            case 7:    return 7
+            case 2:    return 12
+            case 12:   return 1
+            case 1:    return 1
         }
     } else if (dir == "Up") {
         switch curState {
-            case 1:  return 71
-            case 71: return 7
-            case 7:  return 7
-            case 2:  return 82
-            case 82: return 8
-            case 8:  return 8
-            case 12: return 78
-            case 78: return 78
-            case 6:  return 6
+            case 1:    return 71
+            case 71:   return 7
+            case 7:    return 7
+            case 2:    return 82
+            case 82:   return 8
+            case 8:    return 8
+            case 12:   return 7812
+            case 7812: return 78
+            case 78:   return 78
+            case 6:    return 6
         }
     } else if (dir == "Down") {
         switch curState {
-            case 7:  return 71
-            case 71: return 1
-            case 1:  return 1
-            case 8:  return 82
-            case 82: return 2
-            case 2:  return 2
-            case 78: return 12
-            case 12: return 12
-            case 6:  return 6
+            case 7:    return 71
+            case 71:   return 1
+            case 1:    return 1
+            case 8:    return 82
+            case 82:   return 2
+            case 2:    return 2
+            case 78:   return 7812
+            case 7812: return 12
+            case 12:   return 12
+            case 6:    return 6
         }
     }
 
@@ -456,6 +491,7 @@ MeasureTerminalMinWidth(hwnd) {
     Sleep 80
     WinGetPos(&nx, &ny, &nw, &nh, hwnd)
     WinMove(ox, oy, ow, oh, hwnd)
+    Sleep 50
     return nw
 }
 
@@ -507,6 +543,8 @@ CollectWindows() {
             title := WinGetTitle(hwnd)
             if (title == "" || title == "Program Manager" || title == "Settings")
                 continue
+            if (InStr(title, "run_layout") || InStr(title, "arrange_now") || InStr(title, "verify"))
+                continue
             if (WinGetMinMax(hwnd) = -1)
                 continue
             cands.Push(hwnd)
@@ -551,7 +589,8 @@ ArrangeAllWindows() {
         return
     }
 
-    if (g_MinTermWidth = 0 && found.clis.Length > 0)
+    isFirstRun := (g_MinTermWidth = 0)
+    if (isFirstRun && found.clis.Length > 0)
         AutoMeasureMinWidth(found.clis)
 
     slots := [7, 8, 1, 2]
@@ -562,6 +601,17 @@ ArrangeAllWindows() {
     if (found.browser) {
         SnapWindowToState(found.browser, 6, 1)
         Sleep 40
+    }
+
+    ; 冷启动首次排版保护：Windows 11 DWM 最大化还原动画与圆角切换存在异步时滞，
+    ; 自动在首轮排版沉降后执行一次快速无感复位，确保初次使用无需按第二次 Win+Alt+A 即可 100% 严丝合缝
+    if (isFirstRun) {
+        Sleep 60
+        for i, h in found.clis {
+            SnapWindowToState(h, slots[i], 1)
+        }
+        if (found.browser)
+            SnapWindowToState(found.browser, 6, 1)
     }
 
     ToolTip("✔ WinTile5 无缝排版完成 (4 终端 + 1 主界面)")
@@ -597,7 +647,7 @@ Arrange2x2Windows() {
 }
 
 ; ==============================================================================
-; 7. 单元测试自检 (--self-test 模式，40 项状态转移断言)
+; 7. 单元测试自检 (--self-test 模式，10状态转移与几何识别全量断言)
 ; ==============================================================================
 
 RunSelfTest() {
@@ -615,53 +665,78 @@ RunSelfTest() {
         }
     }
 
-    ; 1. Right 状态转移 (9项)
-    expectedRight := Map(7,78, 78,8, 8,6, 1,12, 12,2, 2,6, 71,82, 82,6, 6,6)
+    ; 1. Right 状态转移 (10项)
+    expectedRight := Map(7,78, 78,8, 8,6, 1,12, 12,2, 2,6, 71,7812, 7812,82, 82,6, 6,6)
     for s, exp in expectedRight {
         res := GetNextState(s, "Right", layout, {x: 0, y: 0, w: 100, h: 100})
         AssertEqual(exp, res, "Right: " s " -> " exp) ? passCount++ : failCount++
     }
 
-    ; 2. Left 状态转移 (9项)
-    expectedLeft := Map(6,82, 82,71, 71,71, 8,78, 78,7, 7,7, 2,12, 12,1, 1,1)
+    ; 2. Left 状态转移 (10项)
+    expectedLeft := Map(6,82, 82,7812, 7812,71, 71,71, 8,78, 78,7, 7,7, 2,12, 12,1, 1,1)
     for s, exp in expectedLeft {
         res := GetNextState(s, "Left", layout, {x: 0, y: 0, w: 100, h: 100})
         AssertEqual(exp, res, "Left: " s " -> " exp) ? passCount++ : failCount++
     }
 
-    ; 3. Up 状态转移 (9项)
-    expectedUp := Map(1,71, 71,7, 7,7, 2,82, 82,8, 8,8, 12,78, 78,78, 6,6)
+    ; 3. Up 状态转移 (10项)
+    expectedUp := Map(1,71, 71,7, 7,7, 2,82, 82,8, 8,8, 12,7812, 7812,78, 78,78, 6,6)
     for s, exp in expectedUp {
         res := GetNextState(s, "Up", layout, {x: 0, y: 0, w: 100, h: 100})
         AssertEqual(exp, res, "Up: " s " -> " exp) ? passCount++ : failCount++
     }
 
-    ; 4. Down 状态转移 (9项)
-    expectedDown := Map(7,71, 71,1, 1,1, 8,82, 82,2, 2,2, 78,12, 12,12, 6,6)
+    ; 4. Down 状态转移 (10项)
+    expectedDown := Map(7,71, 71,1, 1,1, 8,82, 82,2, 2,2, 78,7812, 7812,12, 12,12, 6,6)
     for s, exp in expectedDown {
         res := GetNextState(s, "Down", layout, {x: 0, y: 0, w: 100, h: 100})
         AssertEqual(exp, res, "Down: " s " -> " exp) ? passCount++ : failCount++
     }
 
-    ; 5. Unknown 状态的 4 项入口转移 (4项)
-    ; 5.1 Left -> 71
-    res := GetNextState("Unknown", "Left", layout, {x: 100, y: 100, w: 200, h: 200})
-    AssertEqual(71, res, "Unknown + Left -> 71") ? passCount++ : failCount++
+    ; 5. Unknown 状态的智能几何推导转移断言
+    ; 5.1 处于 7 号位区域: Down -> 71 (解决用户反馈的核心痛点: 7 号位按 Down 到 71 而不是 12)
+    res := GetNextState("Unknown", "Down", layout, layout.rects[7])
+    AssertEqual(71, res, "Unknown at slot 7 + Down -> 71") ? passCount++ : failCount++
 
-    ; 5.2 Right (处于左半区) -> 82
-    res := GetNextState("Unknown", "Right", layout, {x: layout.rects[7].x, y: 100, w: 100, h: 100})
-    AssertEqual(82, res, "Unknown + Right (Left zone) -> 82") ? passCount++ : failCount++
+    ; 5.2 处于 8 号位区域: Right -> 6 (用户要求: 8/2/82按右键应当到6号位)
+    res := GetNextState("Unknown", "Right", layout, layout.rects[8])
+    AssertEqual(6, res, "Unknown at slot 8 + Right -> 6") ? passCount++ : failCount++
 
-    ; 5.3 Right (处于 6 号主区域) -> 6
-    res := GetNextState("Unknown", "Right", layout, {x: layout.rects[6].x + 10, y: 100, w: 100, h: 100})
-    AssertEqual(6, res, "Unknown + Right (Main zone) -> 6") ? passCount++ : failCount++
+    ; 5.3 处于 2 号位区域: Right -> 6
+    res := GetNextState("Unknown", "Right", layout, layout.rects[2])
+    AssertEqual(6, res, "Unknown at slot 2 + Right -> 6") ? passCount++ : failCount++
 
-    ; 5.4 Up -> 78, Down -> 12
-    res := GetNextState("Unknown", "Up", layout, {x: 100, y: 100, w: 200, h: 200})
-    AssertEqual(78, res, "Unknown + Up -> 78") ? passCount++ : failCount++
+    ; 5.4 处于 82 号位区域: Right -> 6
+    res := GetNextState("Unknown", "Right", layout, layout.rects[82])
+    AssertEqual(6, res, "Unknown at slot 82 + Right -> 6") ? passCount++ : failCount++
 
-    res := GetNextState("Unknown", "Down", layout, {x: 100, y: 100, w: 200, h: 200})
-    AssertEqual(12, res, "Unknown + Down -> 12") ? passCount++ : failCount++
+    ; 5.5 处于 6 号主区域: Left -> 82 (用户要求: 6号位按左键应当到82合并位)
+    res := GetNextState("Unknown", "Left", layout, layout.rects[6])
+    AssertEqual(82, res, "Unknown at slot 6 + Left -> 82") ? passCount++ : failCount++
+
+    ; 5.6 处于 78 号复合区: Down -> 7812
+    res := GetNextState("Unknown", "Down", layout, layout.rects[78])
+    AssertEqual(7812, res, "Unknown at slot 78 + Down -> 7812") ? passCount++ : failCount++
+
+    ; 5.7 处于 7812 号复合区: Down -> 12
+    res := GetNextState("Unknown", "Down", layout, layout.rects[7812])
+    AssertEqual(12, res, "Unknown at slot 7812 + Down -> 12") ? passCount++ : failCount++
+
+    ; 5.8 处于 12 号复合区: Up -> 7812
+    res := GetNextState("Unknown", "Up", layout, layout.rects[12])
+    AssertEqual(7812, res, "Unknown at slot 12 + Up -> 7812") ? passCount++ : failCount++
+
+    ; 6. 终端最小宽度超限自适应识别测试 (宽度大于 colW 但仍在 7 号位)
+    oversizedTermRect := {
+        x: layout.rects[7].x,
+        y: layout.rects[7].y,
+        w: layout.rects[7].w + 150,
+        h: layout.rects[7].h
+    }
+    identifiedState := FindClosestLayoutState(oversizedTermRect, layout)
+    AssertEqual(7, identifiedState, "FindClosestLayoutState on oversized terminal at slot 7 -> 7") ? passCount++ : failCount++
+    res := GetNextState("Unknown", "Down", layout, oversizedTermRect)
+    AssertEqual(71, res, "Oversized terminal at slot 7 + Down -> 71") ? passCount++ : failCount++
 
     totalTests := passCount + failCount
     FileAppend("`n=== Test Summary: " passCount "/" totalTests " Passed, " failCount " Failed ===`n", "*", "UTF-8")

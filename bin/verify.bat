@@ -22,13 +22,13 @@ if errorlevel 1 goto :err_verify
 echo [PASS] _verify.ahk syntax OK.
 echo.
 
-echo [3/3] Running 40-assertion state machine test...
+echo [3/3] Running 50-assertion state machine and geometry test...
 "%AHK%" /ErrorStdOut "%VERIFY%"
 if errorlevel 1 goto :err_test
 
 echo.
 echo ==========================================================
-echo  [SUCCESS] All 40 tests passed with 0 errors and 0 popups!
+echo  [SUCCESS] All 50 tests passed with 0 errors and 0 popups!
 echo ==========================================================
 goto :done
 
