@@ -33,7 +33,6 @@ echo    Win + Alt + Arrow  : Seamless 5-zone flow
 echo    Win + Alt + A      : 5-window auto layout
 echo    Win + Alt + Q      : Standard 2x2 layout
 echo    Win + Numpad 1,2,7,8,6 : Jump to slots (7=TL, 8=TR, 1=BL, 2=BR, 6=Right)
-echo    Win + Alt + 1,2,7,8,6  : Direct slot jump
 echo ==========================================================
 goto :done
 

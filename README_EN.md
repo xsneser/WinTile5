@@ -31,7 +31,6 @@ Press **`Win + Alt + A`** to instantly snap **4 CLI terminals + 1 main workspace
 | **5-Window One-Click Layout** | **`Win + Alt + A`** | Automatically gathers 4 terminals + 1 browser and snaps them in milliseconds (Slots 7, 8, 1, 2 + 6). |
 | **Reset to Standard 2x2** | `Win + Alt + Q` | Tiles the top 4 windows into a full-screen standard 2×2 grid. |
 | **Numpad Direct Snap** | **`Win + Numpad 1/2/7/8/6`** | 7=Top-Left, 8=Top-Right, 1=Bottom-Left, 2=Bottom-Right, 6=Right Full-Height (works with NumLock On/Off). |
-| **Main Keyboard Direct Snap** | `Win + Alt + 1/2/7/8/6` | Direct jump to corresponding slots. |
 | **Smooth 5-Window Flow** | **`Win + Alt + Arrow Keys`** | Full isomorphic replication of Windows 11's 2x2 state machine with smooth multi-slot transitions. |
 | **Temporary Win+Arrow Takeover** | `Win + F11` | Toggle switch with tray notification; press again to restore native Windows shortcuts. |
 

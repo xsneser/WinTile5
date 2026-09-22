@@ -64,14 +64,7 @@ BuildTrayMenu() {
 #!a:: ArrangeAllWindows()          ; 一键排 5 窗口 (4 CLI + 1 主界面)
 #!q:: Arrange2x2Windows()          ; 一键排标准 2x2 网格
 
-; 1.2 主键盘槽位直达 (1, 2, 7, 8, 6)
-#!7:: SnapActiveWindow(7)          ; 左上
-#!8:: SnapActiveWindow(8)          ; 右上
-#!1:: SnapActiveWindow(1)          ; 左下
-#!2:: SnapActiveWindow(2)          ; 右下
-#!6:: SnapActiveWindow(6)          ; 右侧全高
-
-; 1.3 小键盘槽位直达 (同时支持 NumLock 开启与关闭状态)
+; 1.2 小键盘槽位直达 (同时支持 NumLock 开启与关闭状态)
 #Numpad7::    SnapActiveWindow(7)
 #NumpadHome:: SnapActiveWindow(7)
 
@@ -87,13 +80,13 @@ BuildTrayMenu() {
 #Numpad6::    SnapActiveWindow(6)
 #NumpadRight::SnapActiveWindow(6)
 
-; 1.4 方向键状态流转
+; 1.3 方向键状态流转
 #!Left::  MoveIn5Zones("Left")
 #!Right:: MoveIn5Zones("Right")
 #!Up::    MoveIn5Zones("Up")
 #!Down::  MoveIn5Zones("Down")
 
-; 1.5 临时接管原生 Win+方向键开关
+; 1.4 临时接管原生 Win+方向键开关
 #F11:: ToggleTakeoverMode()
 
 #HotIf g_TakeoverMode
